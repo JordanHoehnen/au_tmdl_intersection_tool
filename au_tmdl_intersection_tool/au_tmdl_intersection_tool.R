@@ -1,41 +1,29 @@
----
-title: "au_tmdl_intersect_tool"
-author: "Jordan Hoehnen"
-date: '2023-03-20'
-output: pdf_document
----
 
-#Libraries
-```{r}
+#This tool is designed to merge EPA 305b IDs with WDNR assesment numbers, WIBIC, and TMDLD IDs in addition to other pertinent info for TMDL development
+
+#Follow the steps numbered ##1-4 to route to the correct data paths
+
 arc.check_product()
 library(arcgisbinding)
 library(sf)
-library(sp)
+library(sp) 
 library(tidyverse)
 library(ROracle)
 library(rgdal)
 library(tidyr)
-```
 
-##Settings 
-#Causes are the analyte's causing water impairments 
-```{r}
 options(scipen = 9)
 
 causes = c("Sediment/Total Suspended Solids",
            "Total Phosphorus")
 
 listed_waters = c("303d Listed", "TMDL Development")
-```
 
+## 1
 #Insert username and password for DNR_SECPRD.WORLD
-```{r}
 usr = rstudioapi::askForPassword(prompt="Please enter username")
 pwd = rstudioapi::askForPassword()
-```
 
-#This code makes  tables comma delimited
-```{r}
 com_delim = function(df, col) {
   out = df %>%
     # st_drop_geometry() %>%
@@ -48,23 +36,24 @@ com_delim = function(df, col) {
     paste(., collapse=", ")
   return(out)
 }
-```
 
-#"info table" -- contains waterbody name, waters ID, WBIC, County, Start & End mile, source category, impairment indicator, pollutant, TP Criterion, Basin, TMDL Subbasin
-```{r}
+
+# Pulling Tables ----------------------------------------------------------
+
+#"info" table -- waterbody name, waters ID, WBIC, County, Start & End mile, source category, impairment indicator, pollutant, TP Criterion, Basin, TMDL Subbasin
 con = dbConnect(drv=Oracle(), dbname="dnr_secprd.world", username=usr, password=pwd)
 info_tbl = dbGetQuery(con, "select OFFICIAL_NAME, WBIC, ASSESSMENT_UNIT_SEQ_NO, COUNTY_NAME, START_MILE_NO, END_MILE_NO, IMPAIRED_WATERS_CATEGORY,
                       IMPAIRMENT, POLLUTANT, WATERSHED_NAME, TMDL_ID, STATUS_CODE from W23321.WT_IMPAIREDWATERS_CNTY_LIST_MV") %>%
   left_join(
-      dbGetQuery(con, "SELECT ASSESSMENT_UNIT_SEQ_NO, EPA_ID305B FROM W23321.WT_ASSESSMENT_UNIT"),
-      by="ASSESSMENT_UNIT_SEQ_NO") %>%
+    dbGetQuery(con, "SELECT ASSESSMENT_UNIT_SEQ_NO, EPA_ID305B FROM W23321.WT_ASSESSMENT_UNIT"),
+    by="ASSESSMENT_UNIT_SEQ_NO") %>%
   filter(POLLUTANT %in% causes)%>%
   filter(STATUS_CODE %in% listed_waters)
 dbDisconnect(con)
-```
 
-#TP Criteria for lakes/imoundments and rivers/streams
-```{r}
+
+# TP Criteria  ------------------------------------------------------------
+
 #Lakes/Impoundments TP Criteria
 con = dbConnect(drv=Oracle(), dbname="dnr_secprd.world", username=usr, password=pwd)
 lakes_tp_criteria = dbGetQuery(con, "SELECT SNAPSHOT_ID, ASSESSMENT_UNIT_SEQ_NO, TP_THRESHHOLD FROM W23321.WT_LAKE_TP_STATION_SUMMARY_VX")
@@ -73,27 +62,31 @@ length(unique(lakes_tp_criteria_drop$ASSESSMENT_UNIT_SEQ_NO))
 length(unique(lakes_tp_criteria_drop$ASSESSMENT_UNIT_SEQ_NO)) == nrow(lakes_tp_criteria_drop)
 dbDisconnect(con)
 
+
 #Stream/River TP Criteria
 con = dbConnect(drv=Oracle(), dbname="dnr_secprd.world", username=usr, password=pwd)
 stream_tp_criteria = dbGetQuery(con, "SELECT ASSESSMENT_UNIT_SEQ_NO, TP_THRESHHOLD_100_FLAG FROM W23321.WT_ASSESSMENT_UNIT")
 dbDisconnect(con)
+
 stream_tp_criteria <- stream_tp_criteria %>%
   mutate(tp_criteria = case_when(TP_THRESHHOLD_100_FLAG == 'Y' ~ '100',
                                  TP_THRESHHOLD_100_FLAG == 'N' ~ '75'))
 stream_tp_criteria = select(stream_tp_criteria, -2)
-```
 
-## Run this code to get subbasins file for the project area
-#Insert corresponding Plan_Seq_No for the TMDL or project area of interest 
-```{r}
+
+# Subbasins ---------------------------------------------------------------
+
+## 2
+#Insert corresponding Plan_Seq_No for the TMDL or area of interest and direct to the path on your computer to WT_PLAN_TMDL_SUBBASINS_AR shapefile
 tmdl_subbasins = arc.open("C:/Users/hoehnj/Documents/ArcGIS/Projects/generic_work/HOEHNJ[DNRWQRP].sde/DNRWQRP.WT_PLAN_TMDL_SUBBASINS_AR")
 tmdl_subbasins = arc.select(tmdl_subbasins, where_clause = "PLAN_SEQ_NO = 153881362")
 tmdl_subbasins_sf = arc.data2sf(tmdl_subbasins)
-```
 
-#Lakes/Impoundments
-```{r}
-#Lakes variable: Route correct path to DNR_SDE.SDE 
+
+# TMDL Lakes --------------------------------------------------------------
+
+## 3
+#Lakes variable: Route correct path to DNR_SDE.SDE and pull W23321.WT_ASSESSMENT_UNIT_AR_24K shapefile
 au_lakes = arc.open("C:/Users/hoehnj/Documents/ArcGIS/Projects/generic_work/dnr_sde.world.sde/W23321.WT_ASSESSMENT_UNIT_DATA_24K/W23321.WT_ASSESSMENT_UNIT_AR_24K")
 au_lakes = arc.select(au_lakes)
 au_lakes_sf = arc.data2sf(au_lakes) %>%
@@ -117,17 +110,16 @@ lakes_intersect <- st_intersection(au_lakes_sf, tmdl_subbasins_sf) %>%
 impaired_lakes <- filter(lakes_intersect[!duplicated(lakes_intersect$WBIC),])
 impaired_lakes <- select(impaired_lakes, -12)
 impaired_lakes <- apply(impaired_lakes,2,as.character)
-```
 
-#Write lakes impairments table to csv. 
-```{r}
-write.csv(impaired_lakes, "nel_impaired_lakes.csv", row.names = FALSE)
-```
+write.csv(impaired_lakes, "_impaired_lakes.csv", row.names = FALSE)
+
+st_write(lakes_intersect, dsn="~/Projects/AU_TMDL_Intersection/temp", layer="lakes_intersection.shp", driver ="ESRI Shapefile")
 
 
-#Rivers/Streams
-```{r}
-#Streams variable: Route correct path to DNR_SDE.SDE  
+# TMDL Streams ------------------------------------------------------------
+
+## 4
+#Streams variable: Route correct path to DNR_SDE.SDE and pull W23321.WT_ASSESSMENT_UNIT_LN_24K shapefile 
 au_streams = arc.open("C:/Users/hoehnj/Documents/ArcGIS/Projects/generic_work/dnr_sde.world.sde/W23321.WT_ASSESSMENT_UNIT_DATA_24K/W23321.WT_ASSESSMENT_UNIT_LN_24K")
 au_streams = arc.select(au_streams)
 au_streams_sf = arc.data2sf(au_streams) %>%
@@ -135,7 +127,7 @@ au_streams_sf = arc.data2sf(au_streams) %>%
   left_join(stream_tp_criteria, by=c("ASSESSMENT_UNIT_SEQ_NO"="ASSESSMENT_UNIT_SEQ_NO")) %>%
   filter(STATUS_CODE %in% listed_waters)
 
-#Intersection between streams and subbasins
+#Intersection between streams and TMDL subbasins
 streams_intersect <- st_intersection(au_streams_sf, tmdl_subbasins_sf) %>% 
   select(OFFICIAL_NAME, ASSESSMENT_UNIT_SEQ_NO, WBIC, COUNTY_NAME, START_MILE_NO, END_MILE_NO, IMPAIRED_WATERS_CATEGORY, IMPAIRMENT,
          POLLUTANT, WATERSHED_NAME, TMDL_ID, EPA_ID305B, STATUS_CODE, SUBBASIN, tp_criteria) %>%
@@ -158,9 +150,7 @@ impaired_streams <- streams_intersect[!duplicated(streams_intersect$geom),] %>%
 impaired_streams = select(impaired_streams, -12)
 
 impaired_streams <- apply(impaired_streams,2,as.character)
-```
 
-#Write stream impairments table to csv. 
-```{r}
-write.csv(impaired_streams, "nel_impaired_streams.csv", row.names = FALSE)
-```
+write.csv(impaired_streams, "_impaired_streams.csv", row.names = FALSE)
+
+st_write(streams_intersect, dsn="~/Projects/AU_TMDL_Intersection/temp", layer="streams_intersection.shp", driver ="ESRI Shapefile")
